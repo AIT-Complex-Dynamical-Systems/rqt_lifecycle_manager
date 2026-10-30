@@ -22,13 +22,16 @@ from lifecycle_msgs.msg import Transition
 from lifecycle_msgs.srv import ChangeState, GetState
 from python_qt_binding import loadUi
 from python_qt_binding.QtCore import QAbstractTableModel, Qt, QTimer, Signal
-from python_qt_binding.QtGui import QFont, QIcon
+from python_qt_binding.QtGui import QBrush, QFont, QIcon
 from python_qt_binding.QtWidgets import QHeaderView, QMenu, QWidget
 from qt_gui.plugin import Plugin
 from ros2lifecycle.api import get_node_names
 
 # Define a simple structure with fields 'name' and 'state'
 NodeState = namedtuple("NodeState", ["name", "state"])
+
+# Shown instead of the lifecycle state if the node does not respond
+UNREACHABLE = "unreachable"
 
 
 class LifecycleManager(Plugin):
@@ -234,8 +237,9 @@ class LifecycleManager(Plugin):
         self._show_lc_nodes()
 
     def _set_state_error(self, node_name, error):
-        # Only report errors of nodes that were reachable before to avoid spamming
-        if self._states.pop(node_name, None) is not None:
+        # Only report the first error to avoid spamming
+        if self._states.get(node_name) != UNREACHABLE:
+            self._states[node_name] = UNREACHABLE
             print(
                 f"Exception while calling service of node '{node_name}': {error}",
                 file=sys.stderr,
@@ -435,6 +439,9 @@ class LifecycleNodeTable(QAbstractTableModel):
             bf = QFont()
             bf.setBold(True)
             return bf
+
+        if role == Qt.ForegroundRole and lc_node.state == UNREACHABLE:
+            return QBrush(Qt.gray)
 
         if role == Qt.TextAlignmentRole and index.column() == 1:
             return Qt.AlignCenter
