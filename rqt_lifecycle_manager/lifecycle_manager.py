@@ -76,7 +76,6 @@ class LifecycleManager(Plugin):
         # Initialize members
         self._lc_node_names = []  # list of lifecycle node names
         self._lc_nodes = []  # list of lifecycle node status
-        self._table_model = None
         self._get_state_clients = {}  # node name -> GetState client
         self._change_state_clients = {}  # node name -> ChangeState client
         self._get_state_requests = {}  # node name -> (future, send time)
@@ -106,6 +105,8 @@ class LifecycleManager(Plugin):
 
         # lc nodes display
         table_view = self._widget.table_view
+        self._table_model = LifecycleNodeTable(self._lc_nodes, self._icons)
+        table_view.setModel(self._table_model)
         table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         table_view.customContextMenuRequested.connect(self._on_lc_node_menu)
 
@@ -277,9 +278,7 @@ class LifecycleManager(Plugin):
             NodeState(name=node_name, state=self._states[node_name])
             for node_name in sorted(self._states.keys())
         ]
-        table_view = self._widget.table_view
-        self._table_model = LifecycleNodeTable(self._lc_nodes, self._icons)
-        table_view.setModel(self._table_model)
+        self._table_model.set_node_info(self._lc_nodes)
 
     def _on_lc_node_menu(self, pos):
         # Get data of selected node
@@ -405,6 +404,20 @@ class LifecycleNodeTable(QAbstractTableModel):
         QAbstractTableModel.__init__(self, parent)
         self._data = node_info
         self._icons = icons
+
+    def set_node_info(self, node_info):
+        """Update the displayed nodes, keeping the view state if the rows are equal."""
+        if node_info == self._data:
+            return
+        if [n.name for n in node_info] != [n.name for n in self._data]:
+            self.beginResetModel()
+            self._data = node_info
+            self.endResetModel()
+            return
+        self._data = node_info
+        self.dataChanged.emit(
+            self.index(0, 0), self.index(len(node_info) - 1, self.columnCount(None) - 1)
+        )
 
     def rowCount(self, parent):
         return len(self._data)
