@@ -20,6 +20,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ROS_DISTRO: [humble, jazzy, kilted, rolling]
+        ROS_DISTRO: [humble, jazzy, kilted, lyrical]
     with:
       ros_distro: ${{ matrix.ROS_DISTRO }}
