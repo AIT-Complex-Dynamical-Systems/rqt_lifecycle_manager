@@ -10,6 +10,5 @@ The plugin reads the following ROS parameters from the rqt node:
 
 - `rqt_lifecycle_manager.update_freq` (float, default: `1.0`) - update rate in Hz for node list and state refresh.
 - `rqt_lifecycle_manager.service_timeout` (float, default: `1.0`) - timeout in seconds for lifecycle service availability and responses.
-- `rqt_lifecycle_manager.spin_timeout` (float, default: `0.5`) - timeout in seconds for each `rclpy.spin_once` call while waiting.
 
 All values must be strictly greater than `0`. Invalid values are ignored and the defaults are used.
