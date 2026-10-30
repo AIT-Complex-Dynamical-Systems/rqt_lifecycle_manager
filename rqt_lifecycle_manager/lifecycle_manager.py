@@ -80,8 +80,12 @@ class LifecycleManager(Plugin):
         self._change_state_clients = {}  # node name -> ChangeState client
         self._get_state_requests = {}  # node name -> (future, send time)
         self._states = {}  # node name -> state label
-        self._get_state_done.connect(self._on_get_state_done, Qt.QueuedConnection)
-        self._change_state_done.connect(self._on_change_state_done, Qt.QueuedConnection)
+        self._get_state_done.connect(
+            self._on_get_state_done, Qt.ConnectionType.QueuedConnection
+        )
+        self._change_state_done.connect(
+            self._on_change_state_done, Qt.ConnectionType.QueuedConnection
+        )
 
         # Store reference to node
         self._node = context.node
@@ -107,12 +111,12 @@ class LifecycleManager(Plugin):
         table_view = self._widget.table_view
         self._table_model = LifecycleNodeTable(self._lc_nodes, self._icons)
         table_view.setModel(self._table_model)
-        table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         table_view.customContextMenuRequested.connect(self._on_lc_node_menu)
 
         header = table_view.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         # Timer for listing nodes and updating their states
         self._update_timer = QTimer(self)
@@ -309,7 +313,7 @@ class LifecycleManager(Plugin):
         else:
             pass  # finalized
 
-        action = menu.exec_(self._widget.table_view.mapToGlobal(pos))
+        action = menu.exec(self._widget.table_view.mapToGlobal(pos))
 
         # Evaluate user action
         if lc_node.state == "active":
@@ -428,7 +432,10 @@ class LifecycleNodeTable(QAbstractTableModel):
         return 2
 
     def headerData(self, col, orientation, role):
-        if orientation != Qt.Horizontal or role != Qt.DisplayRole:
+        if (
+            orientation != Qt.Orientation.Horizontal
+            or role != Qt.ItemDataRole.DisplayRole
+        ):
             return None
         if col == 0:
             return "node"
@@ -441,22 +448,22 @@ class LifecycleNodeTable(QAbstractTableModel):
 
         lc_node = self._data[index.row()]
 
-        if role == Qt.DisplayRole:
+        if role == Qt.ItemDataRole.DisplayRole:
             if index.column() == 0:
                 return lc_node.name
             elif index.column() == 1:
                 return lc_node.state or "not loaded"
 
-        if role == Qt.DecorationRole and index.column() == 0:
+        if role == Qt.ItemDataRole.DecorationRole and index.column() == 0:
             return self._icons.get(lc_node.state)
 
-        if role == Qt.FontRole and index.column() == 0:
+        if role == Qt.ItemDataRole.FontRole and index.column() == 0:
             bf = QFont()
             bf.setBold(True)
             return bf
 
-        if role == Qt.ForegroundRole and lc_node.state == UNREACHABLE:
-            return QBrush(Qt.gray)
+        if role == Qt.ItemDataRole.ForegroundRole and lc_node.state == UNREACHABLE:
+            return QBrush(Qt.GlobalColor.gray)
 
-        if role == Qt.TextAlignmentRole and index.column() == 1:
-            return Qt.AlignCenter
+        if role == Qt.ItemDataRole.TextAlignmentRole and index.column() == 1:
+            return Qt.AlignmentFlag.AlignCenter
