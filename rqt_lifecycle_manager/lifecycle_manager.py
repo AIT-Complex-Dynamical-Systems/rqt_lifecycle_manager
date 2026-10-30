@@ -22,7 +22,7 @@ from ament_index_python.packages import get_package_share_directory
 from lifecycle_msgs.msg import Transition
 from lifecycle_msgs.srv import ChangeState, GetState
 from python_qt_binding import loadUi
-from python_qt_binding.QtCore import QAbstractTableModel, Qt, QTimer
+from python_qt_binding.QtCore import QAbstractTableModel, Qt, QTimer, Signal
 from python_qt_binding.QtGui import QFont, QIcon
 from python_qt_binding.QtWidgets import QHeaderView, QMenu, QWidget
 from qt_gui.plugin import Plugin
@@ -34,6 +34,9 @@ NodeState = namedtuple("NodeState", ["name", "state"])
 
 class LifecycleManager(Plugin):
     """Graphical frontend for interacting with lifecycle nodes."""
+
+    # Emitted from the executor thread when a get_state request is done
+    _get_state_done = Signal(str, object)  # node name, future
 
     _default_update_freq = 1.0  # Hz
     _default_service_timeout = 1.0  # seconds
@@ -73,6 +76,9 @@ class LifecycleManager(Plugin):
         self._table_model = None
         self._get_state_clients = {}  # node name -> GetState client
         self._change_state_clients = {}  # node name -> ChangeState client
+        self._get_state_requests = {}  # node name -> (future, send time)
+        self._states = {}  # node name -> state label
+        self._get_state_done.connect(self._on_get_state_done, Qt.QueuedConnection)
 
         # Store reference to node
         self._node = context.node
@@ -146,6 +152,9 @@ class LifecycleManager(Plugin):
 
     def shutdown_plugin(self):
         self._update_timer.stop()
+        for future, _ in self._get_state_requests.values():
+            future.cancel()
+        self._get_state_requests.clear()
         for clients in (self._get_state_clients, self._change_state_clients):
             for client in clients.values():
                 self._node.destroy_client(client)
@@ -169,38 +178,70 @@ class LifecycleManager(Plugin):
             self._destroy_stale_clients({n.full_name for n in node_names})
 
     def _update_nodes_state(self):
-        # Update lc nodes' states
-        self._lc_nodes = []
-        try:
-            states = self._call_get_states_with_timeout(
-                node_names=[lc_node.full_name for lc_node in self._lc_node_names]
-            )
-        except Exception as error:
-            print(
-                f"Exception while retrieving lifecycle states: {error}",
-                file=sys.stderr,
-            )
-            self._show_lc_nodes()
-            return
+        node_names = [lc_node.full_name for lc_node in self._lc_node_names]
+        for node_name in self._states.keys() - set(node_names):
+            del self._states[node_name]
+        for node_name in self._get_state_requests.keys() - set(node_names):
+            self._get_state_requests.pop(node_name)[0].cancel()
 
-        # Output exceptions and only keep successful responses.
-        valid_states = {}
-        for node_name in sorted(states.keys()):
-            state = states[node_name]
-            if isinstance(state, Exception):
-                print(
-                    f"Exception while calling service of node '{node_name}': {state}",
-                    file=sys.stderr,
+        now = time.monotonic()
+        for node_name in node_names:
+            request = self._get_state_requests.get(node_name)
+            if request is not None:
+                future, stamp = request
+                if now - stamp < self._service_timeout:
+                    continue  # still waiting for the previous response
+                del self._get_state_requests[node_name]
+                future.cancel()
+                self._set_state_error(
+                    node_name,
+                    TimeoutError("Timed out while waiting for get_state response"),
+                )
+
+            client = self._get_client(
+                self._get_state_clients, GetState, node_name, "get_state"
+            )
+            if not client.service_is_ready():
+                self._set_state_error(
+                    node_name,
+                    TimeoutError(
+                        "get_state service is not available "
+                        "(node might have disappeared)"
+                    ),
                 )
                 continue
-            valid_states[node_name] = state
 
-        # output current states
-        for node_name in sorted(valid_states.keys()):
-            state = valid_states[node_name]
-            self._lc_nodes.append(NodeState(name=node_name, state=state.label))
+            # The response is handled in the GUI thread, the rqt executor spins the node
+            future = client.call_async(GetState.Request())
+            self._get_state_requests[node_name] = (future, now)
+            future.add_done_callback(
+                lambda f, n=node_name: self._get_state_done.emit(n, f)
+            )
 
         self._show_lc_nodes()
+
+    def _on_get_state_done(self, node_name, future):
+        request = self._get_state_requests.get(node_name)
+        if request is None or request[0] is not future:
+            return  # response of a cancelled or outdated request
+        del self._get_state_requests[node_name]
+
+        error = future.exception()
+        if error is None and future.result() is None:
+            error = RuntimeError("get_state service call failed")
+        if error is not None:
+            self._set_state_error(node_name, error)
+        else:
+            self._states[node_name] = future.result().current_state.label
+        self._show_lc_nodes()
+
+    def _set_state_error(self, node_name, error):
+        # Only report errors of nodes that were reachable before to avoid spamming
+        if self._states.pop(node_name, None) is not None:
+            print(
+                f"Exception while calling service of node '{node_name}': {error}",
+                file=sys.stderr,
+            )
 
     def _destroy_stale_clients(self, node_names):
         """Destroy the service clients of nodes that left the graph."""
@@ -230,6 +271,10 @@ class LifecycleManager(Plugin):
             return []
 
     def _show_lc_nodes(self):
+        self._lc_nodes = [
+            NodeState(name=node_name, state=self._states[node_name])
+            for node_name in sorted(self._states.keys())
+        ]
         table_view = self._widget.table_view
         self._table_model = LifecycleNodeTable(self._lc_nodes, self._icons)
         table_view.setModel(self._table_model)
@@ -316,53 +361,6 @@ class LifecycleManager(Plugin):
             print("Transitioning successful")
         else:
             print("Transitioning failed", file=sys.stderr)
-
-    def _call_get_states_with_timeout(self, node_names):
-        states = {}
-        clients = {}
-        futures = {}
-        deadline = time.monotonic() + self._service_timeout
-
-        for node_name in node_names:
-            clients[node_name] = self._get_client(
-                self._get_state_clients, GetState, node_name, "get_state"
-            )
-
-        pending = set(node_names)
-        while pending and time.monotonic() < deadline:
-            for node_name in list(pending):
-                client = clients[node_name]
-                if client.service_is_ready():
-                    futures[node_name] = client.call_async(GetState.Request())
-                    pending.remove(node_name)
-
-            if pending:
-                rclpy.spin_once(self._node, timeout_sec=self._spin_timeout)
-
-        for node_name in pending:
-            states[node_name] = TimeoutError(
-                "get_state service is not available (node might have disappeared)"
-            )
-
-        for node_name, future in futures.items():
-            while not future.done() and time.monotonic() < deadline:
-                rclpy.spin_once(self._node, timeout_sec=self._spin_timeout)
-
-            if not future.done():
-                states[node_name] = TimeoutError(
-                    "Timed out while waiting for get_state response"
-                )
-                continue
-
-            response = future.result()
-            if response is not None:
-                states[node_name] = response.current_state
-            else:
-                states[node_name] = future.exception() or RuntimeError(
-                    "get_state service call failed"
-                )
-
-        return states
 
     def _call_change_state_with_timeout(self, node_name, transition):
         client = self._get_client(
