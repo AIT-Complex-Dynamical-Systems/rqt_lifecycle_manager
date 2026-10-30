@@ -106,17 +106,11 @@ class LifecycleManager(Plugin):
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setContextMenuPolicy(Qt.CustomContextMenu)
 
-        # Timer for listing nodes
-        self._update_node_list_timer = QTimer(self)
-        self._update_node_list_timer.setInterval(int(1000.0 / self._update_freq))
-        self._update_node_list_timer.timeout.connect(self._update_node_list)
-        self._update_node_list_timer.start()
-
-        # Timer for running lc node updates
-        self._update_nodes_state_timer = QTimer(self)
-        self._update_nodes_state_timer.setInterval(int(1000.0 / self._update_freq))
-        self._update_nodes_state_timer.timeout.connect(self._update_nodes_state)
-        self._update_nodes_state_timer.start()
+        # Timer for listing nodes and updating their states
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(int(1000.0 / self._update_freq))
+        self._update_timer.timeout.connect(self._update)
+        self._update_timer.start()
 
     def _get_positive_float_param(self, param_name, default_value):
         """Return a positive float from ROS parameters, falling back to default."""
@@ -151,8 +145,7 @@ class LifecycleManager(Plugin):
         return value
 
     def shutdown_plugin(self):
-        self._update_node_list_timer.stop()
-        self._update_nodes_state_timer.stop()
+        self._update_timer.stop()
         for clients in (self._get_state_clients, self._change_state_clients):
             for client in clients.values():
                 self._node.destroy_client(client)
@@ -164,14 +157,16 @@ class LifecycleManager(Plugin):
     def restore_settings(self, plugin_settings, instance_settings):
         pass
 
+    def _update(self):
+        self._update_node_list()
+        self._update_nodes_state()
+
     def _update_node_list(self):
         node_names = self._list_lc_nodes()
 
-        # Update lc node display, if necessary
         if self._lc_node_names != node_names:
             self._lc_node_names = node_names
             self._destroy_stale_clients({n.full_name for n in node_names})
-            self._update_nodes_state()
 
     def _update_nodes_state(self):
         # Update lc nodes' states
