@@ -17,7 +17,6 @@ import sys
 import time
 from collections import namedtuple
 
-import rclpy
 from ament_index_python.packages import get_package_share_directory
 from lifecycle_msgs.msg import Transition
 from lifecycle_msgs.srv import ChangeState, GetState
@@ -37,6 +36,8 @@ class LifecycleManager(Plugin):
 
     # Emitted from the executor thread when a get_state request is done
     _get_state_done = Signal(str, object)  # node name, future
+    # Emitted from the executor thread when a change_state request is done
+    _change_state_done = Signal(str, object, object)  # node name, future, next labels
 
     _default_update_freq = 1.0  # Hz
     _default_service_timeout = 1.0  # seconds
@@ -79,6 +80,7 @@ class LifecycleManager(Plugin):
         self._get_state_requests = {}  # node name -> (future, send time)
         self._states = {}  # node name -> state label
         self._get_state_done.connect(self._on_get_state_done, Qt.QueuedConnection)
+        self._change_state_done.connect(self._on_change_state_done, Qt.QueuedConnection)
 
         # Store reference to node
         self._node = context.node
@@ -313,84 +315,83 @@ class LifecycleManager(Plugin):
         # Evaluate user action
         if lc_node.state == "active":
             if action is action_deactivate:
-                self._call_transition(lc_node.name, "deactivate")
+                self._call_transitions(lc_node.name, ["deactivate"])
             elif action is action_shutdown:
-                self._call_transition(lc_node.name, "shutdown")
+                self._call_transitions(lc_node.name, ["shutdown"])
             elif action is action_unspawn:
-                self._call_transition(lc_node.name, "deactivate")
-                self._call_transition(lc_node.name, "cleanup")
+                self._call_transitions(lc_node.name, ["deactivate", "cleanup"])
         elif lc_node.state == "inactive":
             if action is action_activate:
-                self._call_transition(lc_node.name, "activate")
+                self._call_transitions(lc_node.name, ["activate"])
             elif action is action_cleanup:
-                self._call_transition(lc_node.name, "cleanup")
+                self._call_transitions(lc_node.name, ["cleanup"])
             elif action is action_shutdown:
-                self._call_transition(lc_node.name, "shutdown")
+                self._call_transitions(lc_node.name, ["shutdown"])
         elif lc_node.state == "unconfigured":
             if action is action_configure:
-                self._call_transition(lc_node.name, "configure")
+                self._call_transitions(lc_node.name, ["configure"])
             elif action is action_shutdown:
-                self._call_transition(lc_node.name, "shutdown")
+                self._call_transitions(lc_node.name, ["shutdown"])
             elif action is action_spawn:
-                self._call_transition(lc_node.name, "configure")
-                self._call_transition(lc_node.name, "activate")
+                self._call_transitions(lc_node.name, ["configure", "activate"])
         else:
             pass  # finalized
 
-    def _call_transition(self, node_name, transition_label):
-        transition = Transition(label=transition_label)  #
-
-        try:
-            result = self._call_change_state_with_timeout(
-                node_name=node_name, transition=transition
-            )
-        except Exception as error:
-            print(
-                f"Exception while calling service of node '{node_name}': {error}",
-                file=sys.stderr,
-            )
-            return
-
-        # output response
-        if isinstance(result, Exception):
-            print(
-                f"Exception while calling service of node '{node_name}': {result}",
-                file=sys.stderr,
-            )
-        elif result:
-            print("Transitioning successful")
-        else:
-            print("Transitioning failed", file=sys.stderr)
-
-    def _call_change_state_with_timeout(self, node_name, transition):
+    def _call_transitions(self, node_name, transition_labels):
+        """Request the transitions in order, stopping at the first failure."""
         client = self._get_client(
             self._change_state_clients, ChangeState, node_name, "change_state"
         )
-        deadline = time.monotonic() + self._service_timeout
-
-        while not client.service_is_ready() and time.monotonic() < deadline:
-            rclpy.spin_once(self._node, timeout_sec=self._spin_timeout)
-
         if not client.service_is_ready():
-            return TimeoutError(
-                "change_state service is not available (node might have disappeared)"
+            self._print_transition_error(
+                node_name,
+                TimeoutError(
+                    "change_state service is not available "
+                    "(node might have disappeared)"
+                ),
             )
+            return
 
         request = ChangeState.Request()
-        request.transition = transition
+        request.transition = Transition(label=transition_labels[0])
         future = client.call_async(request)
+        future.add_done_callback(
+            lambda f: self._change_state_done.emit(node_name, f, transition_labels[1:])
+        )
+        QTimer.singleShot(
+            int(1000.0 * self._service_timeout),
+            lambda: self._on_change_state_timeout(node_name, future),
+        )
 
-        while not future.done() and time.monotonic() < deadline:
-            rclpy.spin_once(self._node, timeout_sec=self._spin_timeout)
+    def _on_change_state_timeout(self, node_name, future):
+        if not future.done() and not future.cancelled():
+            future.cancel()
+            self._print_transition_error(
+                node_name,
+                TimeoutError("Timed out while waiting for change_state response"),
+            )
 
-        if not future.done():
-            return TimeoutError("Timed out while waiting for change_state response")
+    def _on_change_state_done(self, node_name, future, transition_labels):
+        if future.cancelled():
+            return  # timed out
 
-        response = future.result()
-        if response is not None:
-            return response.success
+        error = future.exception()
+        if error is None and future.result() is None:
+            error = RuntimeError("change_state service call failed")
+        if error is not None:
+            self._print_transition_error(node_name, error)
+        elif not future.result().success:
+            print("Transitioning failed", file=sys.stderr)
+        else:
+            print("Transitioning successful")
+            if transition_labels:
+                self._call_transitions(node_name, transition_labels)
 
-        return future.exception() or RuntimeError("change_state service call failed")
+    def _print_transition_error(self, node_name, error):
+        print(
+            f"Exception while calling service of node '{node_name}': {error}",
+            file=sys.stderr,
+        )
 
 
 class LifecycleNodeTable(QAbstractTableModel):
