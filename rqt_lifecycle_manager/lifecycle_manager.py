@@ -357,10 +357,12 @@ class LifecycleManager(Plugin):
         future.add_done_callback(
             lambda f: self._change_state_done.emit(node_name, f, transition_labels[1:])
         )
-        QTimer.singleShot(
-            int(1000.0 * self._service_timeout),
-            lambda: self._on_change_state_timeout(node_name, future),
-        )
+        # Parented to the plugin, so it does not fire after the plugin is deleted
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: self._on_change_state_timeout(node_name, future))
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(int(1000.0 * self._service_timeout))
 
     def _on_change_state_timeout(self, node_name, future):
         if not future.done() and not future.cancelled():
