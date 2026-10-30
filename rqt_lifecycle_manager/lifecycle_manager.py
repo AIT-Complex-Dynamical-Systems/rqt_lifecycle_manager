@@ -41,7 +41,6 @@ class LifecycleManager(Plugin):
 
     _default_update_freq = 1.0  # Hz
     _default_service_timeout = 1.0  # seconds
-    _default_spin_timeout = 0.5  # seconds
     _params_prefix = "rqt_lifecycle_manager"
 
     def __init__(self, context):
@@ -91,9 +90,6 @@ class LifecycleManager(Plugin):
         )
         self._service_timeout = self._get_positive_float_param(
             "service_timeout", self._default_service_timeout
-        )
-        self._spin_timeout = self._get_positive_float_param(
-            "spin_timeout", self._default_spin_timeout
         )
 
         # lc node state icons
